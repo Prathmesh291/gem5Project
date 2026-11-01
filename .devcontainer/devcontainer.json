@@ -1,6 +1,5 @@
 {
   "name": "gem5 v22 (ECE565 fork)",
-  "image": "ghcr.io/gem5/ubuntu-20.04_all-dependencies:v23-0",
-  "hostRequirements": { "cpus": 4, "memory": "16gb" },
-  "remoteUser": "root"
+  "build": { "dockerfile": "Dockerfile" },
+  "hostRequirements": { "cpus": 4, "memory": "16gb" }
 }
