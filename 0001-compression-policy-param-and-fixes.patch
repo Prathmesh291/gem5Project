@@ -1,0 +1,249 @@
+From 418e711ec7e5d08ecb15093f506b0bed3f4b4c3b Mon Sep 17 00:00:00 2001
+From: p <p@x>
+Date: Sun, 1 Nov 2026 12:08:51 +0000
+Subject: [PATCH] cache: make compression policy a parameter, fix size
+ accounting, add predictor stats
+
+---
+ configs/common/CacheConfig.py |  7 ++++
+ configs/common/Options.py     |  6 +++
+ src/mem/cache/Cache.py        | 10 +++++
+ src/mem/cache/base.cc         | 72 +++++++++++++++++++++++++++++------
+ src/mem/cache/base.hh         | 11 ++++++
+ src/mem/cache/cache_blk.hh    |  8 ++--
+ 6 files changed, 98 insertions(+), 16 deletions(-)
+
+diff --git a/configs/common/CacheConfig.py b/configs/common/CacheConfig.py
+index 61c6a30..969b57e 100644
+--- a/configs/common/CacheConfig.py
++++ b/configs/common/CacheConfig.py
+@@ -121,6 +121,13 @@ def config_cache(options, system):
+         system.l2 = l2_cache_class(clk_domain=system.cpu_clk_domain,
+                                    **_get_cache_opts('l2', options))
+ 
++        # Compression admission policy for the variable-segment L2 model.
++        if options.l2_compression == "none":
++            system.l2.compressor = NULL
++        else:
++            system.l2.compression_policy = options.l2_compression
++            system.l2.predictor_init = options.l2_pred_init
++
+         system.tol2bus = L2XBar(clk_domain = system.cpu_clk_domain)
+         system.l2.cpu_side = system.tol2bus.mem_side_ports
+         system.l2.mem_side = system.membus.cpu_side_ports
+diff --git a/configs/common/Options.py b/configs/common/Options.py
+index d31560a..e41094c 100644
+--- a/configs/common/Options.py
++++ b/configs/common/Options.py
+@@ -151,6 +151,12 @@ def addNoISAOptions(parser):
+     parser.add_argument("--l1d_assoc", type=int, default=2)
+     parser.add_argument("--l1i_assoc", type=int, default=2)
+     parser.add_argument("--l2_assoc", type=int, default=8)
++    parser.add_argument("--l2-compression", type=str, default="adaptive",
++                        choices=["none", "never", "always", "adaptive"],
++                        help="L2 compression admission policy. 'none' removes "
++                             "the compressor entirely (stock set-assoc cache)")
++    parser.add_argument("--l2-pred-init", type=int, default=-8000000,
++                        help="initial value of the L2 compression predictor")
+     parser.add_argument("--l3_assoc", type=int, default=16)
+     parser.add_argument("--cacheline_size", type=int, default=64)
+ 
+diff --git a/src/mem/cache/Cache.py b/src/mem/cache/Cache.py
+index 72665e1..759caef 100644
+--- a/src/mem/cache/Cache.py
++++ b/src/mem/cache/Cache.py
+@@ -107,6 +107,16 @@ class BaseCache(ClockedObject):
+         "Replacement policy")
+ 
+     compressor = Param.BaseCacheCompressor(NULL, "Cache compressor.")
++    # Compression admission policy for the variable-segment compressed-cache
++    # model (ECE565 project):
++    #   never    - every fill is stored uncompressed
++    #   always   - every fill is compressed with 'compressor'
++    #   adaptive - a global saturating counter (Alameldeen & Wood style)
++    #              chooses per fill. See BaseCache::access().
++    compression_policy = Param.String("adaptive",
++        "Compression admission policy: never | always | adaptive")
++    predictor_init = Param.Int(-8000000,
++        "Initial value of the global compression predictor counter")
+     replace_expansions = Param.Bool(True, "Apply replacement policy to " \
+         "decide which blocks should be evicted on a data expansion")
+     # When a block passes from uncompressed to compressed, it may become
+diff --git a/src/mem/cache/base.cc b/src/mem/cache/base.cc
+index 1c09440..f5c5594 100644
+--- a/src/mem/cache/base.cc
++++ b/src/mem/cache/base.cc
+@@ -140,6 +140,21 @@ BaseCache::BaseCache(const BaseCacheParams &p, unsigned blk_size)
+         "Compressed cache %s does not have a compression algorithm", name());
+     if (compressor)
+         compressor->setCache(this);
++
++    // Compression admission policy (see Cache.py). Decides whether the
++    // global predictor is consulted, forced on, or forced off.
++    compressionPolicy = p.compression_policy;
++    global_predictor = p.predictor_init;
++    if (compressionPolicy == "never") {
++        predictor = false;
++    } else if (compressionPolicy == "always") {
++        predictor = true;
++    } else if (compressionPolicy == "adaptive") {
++        predictor = (global_predictor >= 0);
++    } else {
++        fatal("%s: unknown compression_policy '%s' "
++              "(expected never|always|adaptive)", name(), compressionPolicy);
++    }
+ }
+ 
+ BaseCache::~BaseCache()
+@@ -1356,11 +1371,10 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
+ 
+    //kalabhya code
+     //define a variable to find out if it is a hit or a miss
+-    if (compressor){
++    if (compressor && compressionPolicy == "adaptive"){
+           int hit = 0;
+-          int rank;
+-          size_t setSize;
+-          int i=0;
++          int rank = 0;
++          size_t setSize = 0;
+          // int number_of_blocks_present;
+           if (blk != nullptr){
+                hit = 1;
+@@ -1377,19 +1391,27 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
+          }
+ 
+     //Predictor implementation
+-    if (hit && blk->_compressed && rank<=(assoc/2))
++    if (hit && blk->_compressed && rank<=(assoc/2)) {
++        // hit to a compressed line that would also have hit uncompressed:
++        // we paid decompression latency for nothing
+         global_predictor = global_predictor-5;
+-    else if (hit && blk->_compressed && rank>(assoc/2))
++        stats.predPenaltyEvents++;
++    } else if (hit && blk->_compressed && rank>(assoc/2)) {
++        // hit to a line beyond the uncompressed capacity: an avoided miss
+         global_predictor = global_predictor+80;
+-    else if (!(hit) && setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT))
++        stats.predAvoidedMissEvents++;
++    } else if (!(hit) && setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT)) {
++        // miss while the set still had uncompressed room: avoidable miss
+         global_predictor = global_predictor+80;
++        stats.predAvoidableMissEvents++;
++    }
+ 
+     //DPRINTF(kalabhya2, "%d\n", global_predictor);
+ 
+-    if (global_predictor < 0)
+-           predictor = false;
+-    else
+-           predictor = true;
++    const bool new_decision = (global_predictor >= 0);
++    if (new_decision != predictor)
++        stats.predictorFlips++;
++    predictor = new_decision;
+     //kalabhys_code_ends
+     }
+     DPRINTF(Cache, "%s for %s %s\n", __func__, pkt->print(),
+@@ -1846,9 +1868,17 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
+ 
+     // If using a compressor, set compression data. This must be done after
+     // insertion, as the compression bit may be set.
+-    if (compressor && predictor) {
++    // Always record the stored size: when the predictor declines to
++    // compress, blk_size_bits is still the full line size and must be
++    // charged against the set's physical capacity (otherwise _size is
++    // stale from the previous occupant and the set over-allocates).
++    if (compressor) {
+             compressor->setSizeBits(victim, blk_size_bits);
+             compressor->setDecompressionLatency(victim, decompression_lat);
++            if (blk_size_bits < blkSize * CHAR_BIT)
++                stats.compressedFills++;
++            else
++                stats.uncompressedFills++;
+     }
+ 
+     return victim;
+@@ -2469,6 +2499,18 @@ BaseCache::CacheStats::CacheStats(BaseCache &c)
+              "number of data expansions"),
+     ADD_STAT(dataContractions, statistics::units::Count::get(),
+              "number of data contractions"),
++    ADD_STAT(compressedFills, statistics::units::Count::get(),
++             "number of fills stored compressed"),
++    ADD_STAT(uncompressedFills, statistics::units::Count::get(),
++             "number of fills stored uncompressed"),
++    ADD_STAT(predictorFlips, statistics::units::Count::get(),
++             "number of times the compression predictor changed decision"),
++    ADD_STAT(predPenaltyEvents, statistics::units::Count::get(),
++             "predictor updates: hit to compressed line within uncompressed capacity (-5)"),
++    ADD_STAT(predAvoidedMissEvents, statistics::units::Count::get(),
++             "predictor updates: hit to line beyond uncompressed capacity (+80)"),
++    ADD_STAT(predAvoidableMissEvents, statistics::units::Count::get(),
++             "predictor updates: miss with uncompressed room left in set (+80)"),
+     cmd(MemCmd::NUM_MEM_CMDS)
+ {
+     for (int idx = 0; idx < MemCmd::NUM_MEM_CMDS; ++idx)
+@@ -2698,6 +2740,12 @@ BaseCache::CacheStats::regStats()
+ 
+     dataExpansions.flags(nozero | nonan);
+     dataContractions.flags(nozero | nonan);
++    compressedFills.flags(nozero | nonan);
++    uncompressedFills.flags(nozero | nonan);
++    predictorFlips.flags(nozero | nonan);
++    predPenaltyEvents.flags(nozero | nonan);
++    predAvoidedMissEvents.flags(nozero | nonan);
++    predAvoidableMissEvents.flags(nozero | nonan);
+ }
+ 
+ void
+diff --git a/src/mem/cache/base.hh b/src/mem/cache/base.hh
+index c629408..d35ea10 100644
+--- a/src/mem/cache/base.hh
++++ b/src/mem/cache/base.hh
+@@ -109,6 +109,8 @@ class BaseCache : public ClockedObject
+    //parameters for global predictor added by kalabhya
+    bool predictor = true;
+    int global_predictor = -8000000;
++   /** Compression admission policy: "never" | "always" | "adaptive". */
++   std::string compressionPolicy;
+     /**
+      * Reasons for caches to be blocked.
+      */
+@@ -1148,6 +1150,15 @@ class BaseCache : public ClockedObject
+          */
+         statistics::Scalar dataContractions;
+ 
++        /** Fills stored compressed / uncompressed (variable-segment model). */
++        statistics::Scalar compressedFills;
++        statistics::Scalar uncompressedFills;
++        /** Global predictor: decision flips and per-event update counts. */
++        statistics::Scalar predictorFlips;
++        statistics::Scalar predPenaltyEvents;
++        statistics::Scalar predAvoidedMissEvents;
++        statistics::Scalar predAvoidableMissEvents;
++
+         /** Per-command statistics */
+         std::vector<std::unique_ptr<CacheCmdStats>> cmd;
+     } stats;
+diff --git a/src/mem/cache/cache_blk.hh b/src/mem/cache/cache_blk.hh
+index a447937..d9f9695 100644
+--- a/src/mem/cache/cache_blk.hh
++++ b/src/mem/cache/cache_blk.hh
+@@ -74,10 +74,10 @@ class CacheBlk : public TaggedEntry
+     //kalabhya, adding size bit, stores the size of compression data
+     std::size_t _size = 0;
+     //kalabhya, adding some variable to aid compression
+-    uint8_t _compressionFactor;
+-    int _compressed;
+-    Cycles _decompressionLatency;
+-    Tick lastTouch;
++    uint8_t _compressionFactor = 1;
++    int _compressed = 0;
++    Cycles _decompressionLatency = Cycles(0);
++    Tick lastTouch = 0;
+ 
+ 
+     /**
+-- 
+2.43.0
+

@@ -109,6 +109,8 @@ class BaseCache : public ClockedObject
    //parameters for global predictor added by kalabhya
    bool predictor = true;
    int global_predictor = -8000000;
+   /** Compression admission policy: "never" | "always" | "adaptive". */
+   std::string compressionPolicy;
     /**
      * Reasons for caches to be blocked.
      */
@@ -1147,6 +1149,15 @@ class BaseCache : public ClockedObject
          * factor improved).
          */
         statistics::Scalar dataContractions;
+
+        /** Fills stored compressed / uncompressed (variable-segment model). */
+        statistics::Scalar compressedFills;
+        statistics::Scalar uncompressedFills;
+        /** Global predictor: decision flips and per-event update counts. */
+        statistics::Scalar predictorFlips;
+        statistics::Scalar predPenaltyEvents;
+        statistics::Scalar predAvoidedMissEvents;
+        statistics::Scalar predAvoidableMissEvents;
 
         /** Per-command statistics */
         std::vector<std::unique_ptr<CacheCmdStats>> cmd;

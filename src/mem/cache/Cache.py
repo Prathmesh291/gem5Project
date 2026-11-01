@@ -107,6 +107,16 @@ class BaseCache(ClockedObject):
         "Replacement policy")
 
     compressor = Param.BaseCacheCompressor(NULL, "Cache compressor.")
+    # Compression admission policy for the variable-segment compressed-cache
+    # model (ECE565 project):
+    #   never    - every fill is stored uncompressed
+    #   always   - every fill is compressed with 'compressor'
+    #   adaptive - a global saturating counter (Alameldeen & Wood style)
+    #              chooses per fill. See BaseCache::access().
+    compression_policy = Param.String("adaptive",
+        "Compression admission policy: never | always | adaptive")
+    predictor_init = Param.Int(-8000000,
+        "Initial value of the global compression predictor counter")
     replace_expansions = Param.Bool(True, "Apply replacement policy to " \
         "decide which blocks should be evicted on a data expansion")
     # When a block passes from uncompressed to compressed, it may become

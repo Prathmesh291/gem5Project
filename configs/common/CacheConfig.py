@@ -121,6 +121,13 @@ def config_cache(options, system):
         system.l2 = l2_cache_class(clk_domain=system.cpu_clk_domain,
                                    **_get_cache_opts('l2', options))
 
+        # Compression admission policy for the variable-segment L2 model.
+        if options.l2_compression == "none":
+            system.l2.compressor = NULL
+        else:
+            system.l2.compression_policy = options.l2_compression
+            system.l2.predictor_init = options.l2_pred_init
+
         system.tol2bus = L2XBar(clk_domain = system.cpu_clk_domain)
         system.l2.cpu_side = system.tol2bus.mem_side_ports
         system.l2.mem_side = system.membus.cpu_side_ports

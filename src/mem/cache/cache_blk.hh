@@ -74,10 +74,10 @@ class CacheBlk : public TaggedEntry
     //kalabhya, adding size bit, stores the size of compression data
     std::size_t _size = 0;
     //kalabhya, adding some variable to aid compression
-    uint8_t _compressionFactor;
-    int _compressed;
-    Cycles _decompressionLatency;
-    Tick lastTouch;
+    uint8_t _compressionFactor = 1;
+    int _compressed = 0;
+    Cycles _decompressionLatency = Cycles(0);
+    Tick lastTouch = 0;
 
 
     /**

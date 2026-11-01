@@ -140,6 +140,21 @@ BaseCache::BaseCache(const BaseCacheParams &p, unsigned blk_size)
         "Compressed cache %s does not have a compression algorithm", name());
     if (compressor)
         compressor->setCache(this);
+
+    // Compression admission policy (see Cache.py). Decides whether the
+    // global predictor is consulted, forced on, or forced off.
+    compressionPolicy = p.compression_policy;
+    global_predictor = p.predictor_init;
+    if (compressionPolicy == "never") {
+        predictor = false;
+    } else if (compressionPolicy == "always") {
+        predictor = true;
+    } else if (compressionPolicy == "adaptive") {
+        predictor = (global_predictor >= 0);
+    } else {
+        fatal("%s: unknown compression_policy '%s' "
+              "(expected never|always|adaptive)", name(), compressionPolicy);
+    }
 }
 
 BaseCache::~BaseCache()
@@ -1356,11 +1371,10 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
 
    //kalabhya code
     //define a variable to find out if it is a hit or a miss
-    if (compressor){
+    if (compressor && compressionPolicy == "adaptive"){
           int hit = 0;
-          int rank;
-          size_t setSize;
-          int i=0;
+          int rank = 0;
+          size_t setSize = 0;
          // int number_of_blocks_present;
           if (blk != nullptr){
                hit = 1;
@@ -1377,19 +1391,27 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
          }
 
     //Predictor implementation
-    if (hit && blk->_compressed && rank<=(assoc/2))
+    if (hit && blk->_compressed && rank<=(assoc/2)) {
+        // hit to a compressed line that would also have hit uncompressed:
+        // we paid decompression latency for nothing
         global_predictor = global_predictor-5;
-    else if (hit && blk->_compressed && rank>(assoc/2))
+        stats.predPenaltyEvents++;
+    } else if (hit && blk->_compressed && rank>(assoc/2)) {
+        // hit to a line beyond the uncompressed capacity: an avoided miss
         global_predictor = global_predictor+80;
-    else if (!(hit) && setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT))
+        stats.predAvoidedMissEvents++;
+    } else if (!(hit) && setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT)) {
+        // miss while the set still had uncompressed room: avoidable miss
         global_predictor = global_predictor+80;
+        stats.predAvoidableMissEvents++;
+    }
 
     //DPRINTF(kalabhya2, "%d\n", global_predictor);
 
-    if (global_predictor < 0)
-           predictor = false;
-    else
-           predictor = true;
+    const bool new_decision = (global_predictor >= 0);
+    if (new_decision != predictor)
+        stats.predictorFlips++;
+    predictor = new_decision;
     //kalabhys_code_ends
     }
     DPRINTF(Cache, "%s for %s %s\n", __func__, pkt->print(),
@@ -1846,9 +1868,17 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
 
     // If using a compressor, set compression data. This must be done after
     // insertion, as the compression bit may be set.
-    if (compressor && predictor) {
+    // Always record the stored size: when the predictor declines to
+    // compress, blk_size_bits is still the full line size and must be
+    // charged against the set's physical capacity (otherwise _size is
+    // stale from the previous occupant and the set over-allocates).
+    if (compressor) {
             compressor->setSizeBits(victim, blk_size_bits);
             compressor->setDecompressionLatency(victim, decompression_lat);
+            if (blk_size_bits < blkSize * CHAR_BIT)
+                stats.compressedFills++;
+            else
+                stats.uncompressedFills++;
     }
 
     return victim;
@@ -2469,6 +2499,18 @@ BaseCache::CacheStats::CacheStats(BaseCache &c)
              "number of data expansions"),
     ADD_STAT(dataContractions, statistics::units::Count::get(),
              "number of data contractions"),
+    ADD_STAT(compressedFills, statistics::units::Count::get(),
+             "number of fills stored compressed"),
+    ADD_STAT(uncompressedFills, statistics::units::Count::get(),
+             "number of fills stored uncompressed"),
+    ADD_STAT(predictorFlips, statistics::units::Count::get(),
+             "number of times the compression predictor changed decision"),
+    ADD_STAT(predPenaltyEvents, statistics::units::Count::get(),
+             "predictor updates: hit to compressed line within uncompressed capacity (-5)"),
+    ADD_STAT(predAvoidedMissEvents, statistics::units::Count::get(),
+             "predictor updates: hit to line beyond uncompressed capacity (+80)"),
+    ADD_STAT(predAvoidableMissEvents, statistics::units::Count::get(),
+             "predictor updates: miss with uncompressed room left in set (+80)"),
     cmd(MemCmd::NUM_MEM_CMDS)
 {
     for (int idx = 0; idx < MemCmd::NUM_MEM_CMDS; ++idx)
@@ -2698,6 +2740,12 @@ BaseCache::CacheStats::regStats()
 
     dataExpansions.flags(nozero | nonan);
     dataContractions.flags(nozero | nonan);
+    compressedFills.flags(nozero | nonan);
+    uncompressedFills.flags(nozero | nonan);
+    predictorFlips.flags(nozero | nonan);
+    predPenaltyEvents.flags(nozero | nonan);
+    predAvoidedMissEvents.flags(nozero | nonan);
+    predAvoidableMissEvents.flags(nozero | nonan);
 }
 
 void
