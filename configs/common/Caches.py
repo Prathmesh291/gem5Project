@@ -53,7 +53,6 @@ class L1Cache(Cache):
     response_latency = 2
     mshrs = 4
     tgts_per_mshr = 20
-    clusivity = "mostly_excl"
 
 class L1_ICache(L1Cache):
     is_read_only = True
@@ -61,7 +60,8 @@ class L1_ICache(L1Cache):
     writeback_clean = True
 
 class L1_DCache(L1Cache):
-    pass
+    # L2 below is mostly exclusive (victim cache): write back clean lines too
+    writeback_clean = True
 
 class L2Cache(Cache):
     assoc = 8
