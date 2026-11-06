@@ -157,6 +157,9 @@ def addNoISAOptions(parser):
                              "the compressor entirely (stock set-assoc cache)")
     parser.add_argument("--l2-pred-init", type=int, default=-8000000,
                         help="initial value of the L2 compression predictor")
+    parser.add_argument("--l2-pred-rule", type=str, default="legacy",
+                        choices=["legacy", "shadow"],
+                        help="L2 compression predictor avoidable-miss rule")
     parser.add_argument("--l3_assoc", type=int, default=16)
     parser.add_argument("--cacheline_size", type=int, default=64)
 

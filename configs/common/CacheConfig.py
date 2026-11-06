@@ -127,6 +127,7 @@ def config_cache(options, system):
         else:
             system.l2.compression_policy = options.l2_compression
             system.l2.predictor_init = options.l2_pred_init
+            system.l2.predictor_rule = options.l2_pred_rule
 
         system.tol2bus = L2XBar(clk_domain = system.cpu_clk_domain)
         system.l2.cpu_side = system.tol2bus.mem_side_ports

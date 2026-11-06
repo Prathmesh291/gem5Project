@@ -361,6 +361,17 @@ class BaseTags : public ClockedObject
     //kalabhya
     virtual int getRank(Addr addr, CacheBlk *blk) = 0;
     virtual size_t getSetSize(Addr addr) = 0;
+
+    /**
+     * Victim-tag ("shadow") buffer for the predictor's shadow rule.
+     * Default: no buffer (used by tag types that don't model it).
+     */
+    virtual void shadowInsert(CacheBlk *blk) {}
+    virtual bool shadowLookup(Addr addr, bool is_secure, bool &fit)
+    {
+        fit = false;
+        return false;
+    }
   private:
     /**
      * Update the reference stats using data from the input block

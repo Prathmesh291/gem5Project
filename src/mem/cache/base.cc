@@ -145,6 +145,11 @@ BaseCache::BaseCache(const BaseCacheParams &p, unsigned blk_size)
     // global predictor is consulted, forced on, or forced off.
     compressionPolicy = p.compression_policy;
     global_predictor = p.predictor_init;
+    predictorRule = p.predictor_rule;
+    if (predictorRule != "legacy" && predictorRule != "shadow") {
+        fatal("%s: unknown predictor_rule '%s' (expected legacy|shadow)",
+              name(), predictorRule);
+    }
     if (compressionPolicy == "never") {
         predictor = false;
     } else if (compressionPolicy == "always") {
@@ -1014,18 +1019,20 @@ BaseCache::updateCompressionData(CacheBlk *&blk, const uint64_t* data,
     Cycles decompression_lat = Cycles(0);
     std::size_t compression_size;
 
-
-    if (compressor && predictor){
+    std::size_t potential_bits = blkSize * CHAR_BIT;
+    if (compressor){
         const auto comp_data =
             compressor->compress(data, compression_lat, decompression_lat);
-            compression_size = comp_data->getSizeBits();
-            compression_size = (compression_size + 63) & ~63;
-            if (compression_size < blkSize*CHAR_BIT){
-                decompression_lat = Cycles(5);
-            }
+        potential_bits = (comp_data->getSizeBits() + 63) & ~63;
     }
-    else{
+    if (predictor) {
+        compression_size = potential_bits;
+        if (compression_size < blkSize*CHAR_BIT){
+            decompression_lat = Cycles(5);
+        }
+    } else {
         compression_size = blkSize * CHAR_BIT;
+        decompression_lat = Cycles(0);
     }
     // Get previous compressed size
     [[maybe_unused]] const std::size_t prev_size =
@@ -1083,6 +1090,7 @@ BaseCache::updateCompressionData(CacheBlk *&blk, const uint64_t* data,
 
     compressor->setSizeBits(blk, compression_size);
     blk->setDecompressionLatency(decompression_lat);
+    blk->_potentialSizeBits = potential_bits;
     DPRINTF(kalabhya,"Exit updateCompressionData\n");
     return true;
 }
@@ -1400,10 +1408,28 @@ BaseCache::access(PacketPtr pkt, CacheBlk *&blk, Cycles &lat,
         // hit to a line beyond the uncompressed capacity: an avoided miss
         global_predictor = global_predictor+80;
         stats.predAvoidedMissEvents++;
-    } else if (!(hit) && setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT)) {
-        // miss while the set still had uncompressed room: avoidable miss
-        global_predictor = global_predictor+80;
-        stats.predAvoidableMissEvents++;
+    } else if (!hit) {
+        if (predictorRule == "legacy") {
+            // legacy rule: any miss while the set still had uncompressed room
+            // (includes writebacks; kept bit-exact for comparison)
+            if (setSize<=((blkSize*(assoc/2)*CHAR_BIT) - 8*CHAR_BIT)) {
+                global_predictor = global_predictor+80;
+                stats.predAvoidableMissEvents++;
+            }
+        } else if (!pkt->isEviction()) {
+            // shadow rule: demand miss only. Credit compression if this line
+            // was evicted from the set recently AND would have fit had the
+            // set been stored compressed.
+            bool fit = false;
+            if (tags->shadowLookup(pkt->getAddr(), pkt->isSecure(), fit)) {
+                if (fit) {
+                    global_predictor = global_predictor+80;
+                    stats.predAvoidableMissEvents++;
+                } else {
+                    stats.predShadowHitNoFit++;
+                }
+            }
+        }
     }
 
     //DPRINTF(kalabhya2, "%d\n", global_predictor);
@@ -1810,14 +1836,22 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
     //kalabhya, compressing through FPC,
     // even if compression is not set by default in configs
     //if (compressor && pkt->hasData()) {
-    if (compressor && pkt->hasData() && predictor) {
+    // Always compute the compressed size (needed as per-line metadata for
+    // the shadow predictor rule); apply it only if the predictor says so.
+    std::size_t potential_bits = blkSize * CHAR_BIT;
+    if (compressor && pkt->hasData()) {
             const auto comp_data = compressor->compress(
                 pkt->getConstPtr<uint64_t>(), compression_lat,
                 decompression_lat);
-            blk_size_bits = comp_data->getSizeBits();
-            blk_size_bits = (blk_size_bits + 63) & ~63;
-            if (blk_size_bits < blkSize*CHAR_BIT){
-                decompression_lat = Cycles(5);
+            potential_bits = (comp_data->getSizeBits() + 63) & ~63;
+            if (predictor) {
+                blk_size_bits = potential_bits;
+                if (blk_size_bits < blkSize*CHAR_BIT){
+                    decompression_lat = Cycles(5);
+                }
+            } else {
+                // stored uncompressed: no decompression on hits
+                decompression_lat = Cycles(0);
             }
         }
 
@@ -1875,6 +1909,7 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
     if (compressor) {
             compressor->setSizeBits(victim, blk_size_bits);
             compressor->setDecompressionLatency(victim, decompression_lat);
+            victim->_potentialSizeBits = potential_bits;
             if (blk_size_bits < blkSize * CHAR_BIT)
                 stats.compressedFills++;
             else
@@ -1907,6 +1942,13 @@ BaseCache::invalidateBlock(CacheBlk *blk)
 void
 BaseCache::evictBlock(CacheBlk *blk, PacketList &writebacks)
 {
+    // Record true capacity evictions in the set's victim-tag buffer. The
+    // mostly-exclusive "line moves up to L1" path invalidates directly and
+    // does not come through here, which is what we want.
+    if (compressor && predictorRule == "shadow" && blk->isValid()) {
+        tags->shadowInsert(blk);
+        stats.shadowInserts++;
+    }
     PacketPtr pkt = evictBlock(blk);
     if (pkt) {
         writebacks.push_back(pkt);
@@ -2511,6 +2553,10 @@ BaseCache::CacheStats::CacheStats(BaseCache &c)
              "predictor updates: hit to line beyond uncompressed capacity (+80)"),
     ADD_STAT(predAvoidableMissEvents, statistics::units::Count::get(),
              "predictor updates: miss with uncompressed room left in set (+80)"),
+    ADD_STAT(predShadowHitNoFit, statistics::units::Count::get(),
+             "predictor: miss found in victim tags but would not have fit compressed"),
+    ADD_STAT(shadowInserts, statistics::units::Count::get(),
+             "evicted lines recorded in victim-tag buffers"),
     cmd(MemCmd::NUM_MEM_CMDS)
 {
     for (int idx = 0; idx < MemCmd::NUM_MEM_CMDS; ++idx)
@@ -2746,6 +2792,8 @@ BaseCache::CacheStats::regStats()
     predPenaltyEvents.flags(nozero | nonan);
     predAvoidedMissEvents.flags(nozero | nonan);
     predAvoidableMissEvents.flags(nozero | nonan);
+    predShadowHitNoFit.flags(nozero | nonan);
+    shadowInserts.flags(nozero | nonan);
 }
 
 void

@@ -111,6 +111,8 @@ class BaseCache : public ClockedObject
    int global_predictor = -8000000;
    /** Compression admission policy: "never" | "always" | "adaptive". */
    std::string compressionPolicy;
+    /** Avoidable-miss rule for the predictor: "legacy" | "shadow". */
+    std::string predictorRule;
     /**
      * Reasons for caches to be blocked.
      */
@@ -1158,6 +1160,10 @@ class BaseCache : public ClockedObject
         statistics::Scalar predPenaltyEvents;
         statistics::Scalar predAvoidedMissEvents;
         statistics::Scalar predAvoidableMissEvents;
+        /** Shadow rule: miss found in victim tags but compression could not have saved it. */
+        statistics::Scalar predShadowHitNoFit;
+        /** Number of evicted lines recorded in the victim-tag buffers. */
+        statistics::Scalar shadowInserts;
 
         /** Per-command statistics */
         std::vector<std::unique_ptr<CacheCmdStats>> cmd;

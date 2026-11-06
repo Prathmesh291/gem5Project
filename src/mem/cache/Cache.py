@@ -117,6 +117,8 @@ class BaseCache(ClockedObject):
         "Compression admission policy: never | always | adaptive")
     predictor_init = Param.Int(-8000000,
         "Initial value of the global compression predictor counter")
+    predictor_rule = Param.String("legacy",
+        "Avoidable-miss rule: legacy (set has room) | shadow (victim-tag buffer)")
     replace_expansions = Param.Bool(True, "Apply replacement policy to " \
         "decide which blocks should be evicted on a data expansion")
     # When a block passes from uncompressed to compressed, it may become

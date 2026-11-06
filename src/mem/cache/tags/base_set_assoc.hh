@@ -309,6 +309,71 @@ class BaseSetAssoc : public BaseTags
        return setSize;
    }
 
+   /** One victim-tag ("shadow") entry: a recently evicted line. */
+   struct ShadowEntry
+   {
+       bool valid = false;
+       bool secure = false;
+       Addr tag = 0;
+       bool fitIfCompressed = false;
+   };
+   /** Per-set FIFO of the last allocAssoc/2 evicted lines (sized lazily). */
+   std::vector<std::vector<ShadowEntry>> shadow;
+   std::vector<unsigned> shadowHead;
+
+   void shadowInitIfNeeded()
+   {
+       if (shadow.empty()) {
+           const unsigned sets = numBlocks / allocAssoc;
+           const unsigned depth = allocAssoc / 2;
+           shadow.assign(sets, std::vector<ShadowEntry>(depth));
+           shadowHead.assign(sets, 0);
+       }
+   }
+
+   /** Record an evicted line, deciding whether compression would have saved it. */
+   void shadowInsert(CacheBlk *blk) override
+   {
+       shadowInitIfNeeded();
+       const Addr addr = regenerateBlkAddr(blk);
+
+       // Would-be compressed footprint of the OTHER valid lines in this set.
+       std::size_t others = 0;
+       for (const auto& entry : indexingPolicy->getPossibleEntries(addr)) {
+           CacheBlk* e = static_cast<CacheBlk*>(entry);
+           if (e != blk && e->isValid())
+               others += e->_potentialSizeBits;
+       }
+       const std::size_t capacity_bits = (allocAssoc / 2) * blkSize * 8;
+       const bool fit = (others + blk->_potentialSizeBits) <= capacity_bits;
+
+       const uint32_t set = blk->getSet();
+       ShadowEntry &slot = shadow[set][shadowHead[set]];
+       slot.valid = true;
+       slot.secure = blk->isSecure();
+       slot.tag = blk->getTag();
+       slot.fitIfCompressed = fit;
+       shadowHead[set] = (shadowHead[set] + 1) % shadow[set].size();
+   }
+
+   /** On a demand miss: was this line evicted recently? Consumes the entry. */
+   bool shadowLookup(Addr addr, bool is_secure, bool &fit) override
+   {
+       shadowInitIfNeeded();
+       const auto entries = indexingPolicy->getPossibleEntries(addr);
+       const uint32_t set = entries[0]->getSet();
+       const Addr tag = extractTag(addr);
+       for (auto &slot : shadow[set]) {
+           if (slot.valid && slot.secure == is_secure && slot.tag == tag) {
+               fit = slot.fitIfCompressed;
+               slot.valid = false;
+               return true;
+           }
+       }
+       fit = false;
+       return false;
+   }
+
 };
 
 } // namespace gem5

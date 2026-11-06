@@ -78,6 +78,8 @@ class CacheBlk : public TaggedEntry
     int _compressed = 0;
     Cycles _decompressionLatency = Cycles(0);
     Tick lastTouch = 0;
+    /** Size this line would occupy if stored compressed (bits, 64-bit rounded). */
+    std::size_t _potentialSizeBits = 512;
 
 
     /**
