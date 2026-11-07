@@ -1071,10 +1071,13 @@ BaseCache::updateCompressionData(CacheBlk *&blk, const uint64_t* data,
         }
 
         // Try to evict blocks; if it fails, give up on update
+        fillPotentialBits = potential_bits;
         if (!handleEvictions(evict_blks, writebacks)) {
+            fillPotentialBits = 0;
             DPRINTF(kalabhya,"Exit updateCompressionData failed eviction\n");
             return false;
         }
+        fillPotentialBits = 0;
 
        // DPRINTF(CacheComp, "Data %s: [%s] from %d to %d bits\n",
        //         op_name, blk->print(), prev_size, compression_size);
@@ -1893,9 +1896,12 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
     DPRINTF(CacheRepl, "Replacement victim: %s\n", victim->print());
 
     // Try to evict blocks; if it fails, give up on allocation
+    fillPotentialBits = potential_bits;
     if (!handleEvictions(evict_blks, writebacks)) {
+        fillPotentialBits = 0;
         return nullptr;
     }
+    fillPotentialBits = 0;
 
     // Insert new block at victimized entry
     tags->insertBlock(pkt, victim);
@@ -1946,7 +1952,7 @@ BaseCache::evictBlock(CacheBlk *blk, PacketList &writebacks)
     // mostly-exclusive "line moves up to L1" path invalidates directly and
     // does not come through here, which is what we want.
     if (compressor && predictorRule == "shadow" && blk->isValid()) {
-        tags->shadowInsert(blk);
+        tags->shadowInsert(blk, fillPotentialBits);
         stats.shadowInserts++;
     }
     PacketPtr pkt = evictBlock(blk);

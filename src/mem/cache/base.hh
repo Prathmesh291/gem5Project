@@ -113,6 +113,8 @@ class BaseCache : public ClockedObject
    std::string compressionPolicy;
     /** Avoidable-miss rule for the predictor: "legacy" | "shadow". */
     std::string predictorRule;
+    /** Would-be compressed size of the fill currently causing evictions. */
+    std::size_t fillPotentialBits = 0;
     /**
      * Reasons for caches to be blocked.
      */

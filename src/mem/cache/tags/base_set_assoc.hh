@@ -332,20 +332,26 @@ class BaseSetAssoc : public BaseTags
    }
 
    /** Record an evicted line, deciding whether compression would have saved it. */
-   void shadowInsert(CacheBlk *blk) override
+   void shadowInsert(CacheBlk *blk, std::size_t incoming_bits) override
    {
        shadowInitIfNeeded();
        const Addr addr = regenerateBlkAddr(blk);
 
        // Would-be compressed footprint of the OTHER valid lines in this set.
        std::size_t others = 0;
+       unsigned others_cnt = 0;
        for (const auto& entry : indexingPolicy->getPossibleEntries(addr)) {
            CacheBlk* e = static_cast<CacheBlk*>(entry);
-           if (e != blk && e->isValid())
+           if (e != blk && e->isValid()) {
                others += e->_potentialSizeBits;
+               others_cnt++;
+           }
        }
        const std::size_t capacity_bits = (allocAssoc / 2) * blkSize * 8;
-       const bool fit = (others + blk->_potentialSizeBits) <= capacity_bits;
+       // Would victim AND the incoming line both have fit, compressed, within
+       // the set's data capacity and its tag count?
+       const bool fit = (others + blk->_potentialSizeBits + incoming_bits <= capacity_bits)
+                     && (others_cnt + 2 <= allocAssoc);
 
        const uint32_t set = blk->getSet();
        ShadowEntry &slot = shadow[set][shadowHead[set]];

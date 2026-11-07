@@ -366,7 +366,7 @@ class BaseTags : public ClockedObject
      * Victim-tag ("shadow") buffer for the predictor's shadow rule.
      * Default: no buffer (used by tag types that don't model it).
      */
-    virtual void shadowInsert(CacheBlk *blk) {}
+    virtual void shadowInsert(CacheBlk *blk, std::size_t incoming_bits) {}
     virtual bool shadowLookup(Addr addr, bool is_secure, bool &fit)
     {
         fit = false;
